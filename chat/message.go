@@ -1,6 +1,10 @@
 package chat
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/lxfontes/jarbas/logger"
+)
 
 type ChatMessage struct {
 	Bot             *ChatBot
@@ -9,6 +13,7 @@ type ChatMessage struct {
 	User            *ChatUser
 	Args            ChatArgs
 	ThreadTimestamp string
+	Logger          logger.Log
 
 	Match     string
 	Body      string
@@ -54,4 +59,8 @@ func (cm *ChatMessage) ReplyPrivately(s string, args ...interface{}) (*ChatReply
 
 func (cm *ChatMessage) AddReaction(reaction string) error {
 	return cm.Bot.ReactToMessage(cm, reaction)
+}
+
+func (cm *ChatMessage) AuthorizeUser(site string, role string) (ChatExternalUser, error) {
+	return cm.Bot.AuthorizeUser(cm.User, site, role)
 }

@@ -60,17 +60,8 @@ func RegisterHandlers(b *chat.ChatBot) error {
 
 	b.AddEventHandler(chat.EventReaction, th)
 
-	gl := &githubLink{}
-	b.AddMessageHandler(githubFetchCommand,
-		gl,
-		chat.WithRequiredArg("id", "link id"),
-	)
-	b.AddMessageHandler(githubSaveCommand,
-		gl,
-		chat.WithRequiredArg("id", "link id"),
-		chat.WithRequiredArg("link", "link itself"),
-	)
+	tt := &testHandler{}
+	b.AddMessageHandler("auth github", tt)
 
-	b.AddAuthHandler("github", gl.authHandler)
 	return nil
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/lxfontes/jarbas/logger"
 	"github.com/lxfontes/jarbas/store"
 	"github.com/nlopes/slack"
 )
@@ -85,46 +86,71 @@ type chatArg struct {
 
 type ChatErrorHandler func(handler ChatHandler, err error)
 
-type ChatExternalUser struct {
-	user  *ChatUser
-	site  string
-	name  string
-	id    string
-	token string
-}
-
-func (ceu *ChatExternalUser) User() *ChatUser {
-	return ceu.user
-}
-
-func (ceu *ChatExternalUser) Site() string {
-	return ceu.site
-}
-
-func (ceu *ChatExternalUser) Name() string {
-	return ceu.name
-}
-
-func (ceu *ChatExternalUser) ID() string {
-	return ceu.id
-}
-
-func (ceu *ChatExternalUser) Token() string {
-	return ceu.token
-}
-
-func NewChatExternalUser(user *ChatUser, name string, id string, token string) *ChatExternalUser {
-	return &ChatExternalUser{
-		user:  user,
-		name:  name,
-		id:    id,
-		token: token,
-	}
+type ChatExternalUser interface {
+	Site() string
+	Name() string
+	ID() string
+	Token() string
 }
 
 var ErrUserAuthNeeded = errors.New("need auth for site")
 
-type ChatAuthHandler func(user *ChatUser, role string) (*ChatExternalUser, error)
+type directory struct {
+	// keeps an in-memory representation of our workspace
+	channelIDToName map[string]string
+	userIDToName    map[string]string
+	slackAPI        *slack.Client
+	mtx             sync.RWMutex
+}
+
+func newDirectory(slackAPI *slack.Client) *directory {
+	return &directory{
+		slackAPI:        slackAPI,
+		channelIDToName: map[string]string{},
+		userIDToName:    map[string]string{},
+	}
+}
+
+func (d *directory) setup(ev *slack.ConnectedEvent) {
+	d.mtx.Lock()
+	defer d.mtx.Unlock()
+
+	d.channelIDToName = map[string]string{}
+	d.userIDToName = map[string]string{}
+
+	for _, user := range ev.Info.Users {
+		d.userIDToName[user.ID] = user.Name
+	}
+
+	for _, channel := range ev.Info.Channels {
+		d.channelIDToName[channel.ID] = channel.Name
+	}
+}
+
+func (d *directory) userForID(id string) (string, bool) {
+	d.mtx.RLock()
+	defer d.mtx.RUnlock()
+
+	name, ok := d.userIDToName[id]
+	return name, ok
+}
+
+func (d *directory) channelForID(id string) (string, bool) {
+	d.mtx.RLock()
+	defer d.mtx.RUnlock()
+
+	name, ok := d.channelIDToName[id]
+	if ok {
+		return name, ok
+	}
+
+	return d.userForID(id)
+}
+
+type ChatAuthHandler interface {
+	Authorize(user *ChatUser, role string) (ChatExternalUser, error)
+	Name() string
+}
 
 type ChatBot struct {
 	chatHandlers   map[string][]*chatAction // indexed by command, ex: 'say'
@@ -137,54 +163,27 @@ type ChatBot struct {
 	slackRTM *slack.RTM
 
 	outgoingIDs sync.Map // used to track outgoing message timestamps (ChatReply)
+	directory   *directory
 
-	// keeps an in-memory representation of our workspace
-	channelIDToName map[string]string
-	userIDToName    map[string]string
-
-	store store.Store
+	store  store.Store
+	logger logger.Log
 }
 
 func NewChatBot(token string) (*ChatBot, error) {
+	apiClient := slack.New(token)
 	return &ChatBot{
-		chatHandlers:    map[string][]*chatAction{},
-		eventHandlers:   map[string][]ChatEventHandler{},
-		authHandlers:    map[string]ChatAuthHandler{},
-		slackAPI:        slack.New(token),
-		channelIDToName: map[string]string{},
-		userIDToName:    map[string]string{},
-		store:           store.NewMemoryStore(),
+		chatHandlers:  map[string][]*chatAction{},
+		eventHandlers: map[string][]ChatEventHandler{},
+		authHandlers:  map[string]ChatAuthHandler{},
+		slackAPI:      apiClient,
+		store:         store.NewMemoryStore(),
+		logger:        logger.DefaultLogger(),
+		directory:     newDirectory(apiClient),
 	}, nil
-}
-
-func (cb *ChatBot) connectionSetup(ev *slack.ConnectedEvent) {
-	cb.channelIDToName = map[string]string{}
-	cb.userIDToName = map[string]string{}
-
-	for _, user := range ev.Info.Users {
-		fmt.Println(user.ID, user.Name)
-		cb.userIDToName[user.ID] = user.Name
-	}
-
-	for _, channel := range ev.Info.Channels {
-		cb.channelIDToName[channel.ID] = channel.Name
-	}
 }
 
 func (cb *ChatBot) Store() store.Store {
 	return cb.store
-}
-
-func (cb *ChatBot) NameForID(id string) (string, bool) {
-	if user, ok := cb.userIDToName[id]; ok {
-		return user, ok
-	}
-
-	if channel, ok := cb.channelIDToName[id]; ok {
-		return channel, ok
-	}
-
-	return "", false
 }
 
 func (cb *ChatBot) Serve() {
@@ -200,7 +199,7 @@ func (cb *ChatBot) Serve() {
 			cr := &ChatEventConnection{
 				Connected: true,
 			}
-			cb.connectionSetup(ev)
+			cb.directory.setup(ev)
 			go cb.emitEvent(EventConnection, cr)
 
 		case *slack.DisconnectedEvent:
@@ -213,42 +212,33 @@ func (cb *ChatBot) Serve() {
 			if ev.SubType == "message_replied" {
 				continue
 			}
-			fmt.Printf("%+v\n", ev)
 			go cb.handleMessage(ev)
 
 		case *slack.PresenceChangeEvent:
-			name, _ := cb.NameForID(ev.User)
+			name, _ := cb.directory.userForID(ev.User)
 			cr := &ChatEventPresence{
 				Status: ev.Presence,
-				User: &ChatUser{
-					bot:  cb,
-					id:   ev.User,
-					name: name,
-				},
+				User:   cb.userFor(ev.User, name),
 			}
 			go cb.emitEvent(EventPresence, cr)
 
 		case *slack.LatencyReport:
-			fmt.Printf("Current latency: %v\n", ev.Value)
+			cb.Logger().WithField("latency", ev.Value).Info("latency report")
 
 		case *slack.RTMError:
-			fmt.Printf("Error: %s\n", ev.Error())
+			cb.Logger().WithError(ev).Error("rtm error")
 
 		case *slack.InvalidAuthEvent:
-			fmt.Printf("Invalid credentials")
+			cb.Logger().Error("invalid credentials")
 			return
 
 		case *slack.ReactionAddedEvent:
-			userName, _ := cb.NameForID(ev.User)
-			channelName, _ := cb.NameForID(ev.Item.Channel)
+			userName, _ := cb.directory.userForID(ev.User)
+			channelName, _ := cb.directory.channelForID(ev.Item.Channel)
 			cr := &ChatEventReaction{
 				Timestamp: ev.Item.Timestamp,
 				Reaction:  ev.Reaction,
-				User: &ChatUser{
-					bot:  cb,
-					id:   ev.User,
-					name: userName,
-				},
+				User:      cb.userFor(ev.User, userName),
 				Channel: &ChatChannel{
 					id:   ev.Item.Channel,
 					name: channelName,
@@ -257,19 +247,14 @@ func (cb *ChatBot) Serve() {
 			go cb.emitEvent(EventReaction, cr)
 
 		case *slack.ReactionRemovedEvent:
-			userName, _ := cb.NameForID(ev.User)
-			channelName, _ := cb.NameForID(ev.Item.Channel)
+			userName, _ := cb.directory.userForID(ev.User)
+			channelName, _ := cb.directory.channelForID(ev.Item.Channel)
 			cr := &ChatEventReaction{
 				Timestamp: ev.Item.Timestamp,
 				Reaction:  ev.Reaction,
 				Removed:   true,
-				User: &ChatUser{
-					bot:  cb,
-					id:   ev.User,
-					name: userName,
-				},
-				Channel: &ChatUser{
-					bot:  cb,
+				User:      cb.userFor(ev.User, userName),
+				Channel: &ChatChannel{
 					id:   ev.Item.Channel,
 					name: channelName,
 				},
@@ -280,7 +265,7 @@ func (cb *ChatBot) Serve() {
 			// map our internal id to a slack timestamp
 			item, ok := cb.outgoingIDs.Load(ev.ReplyTo)
 			if !ok {
-				fmt.Println("don't know about this message", ev.ReplyTo)
+				cb.Logger().WithField("message_id", ev.ReplyTo).Warning("received ack for unknown")
 				continue
 			}
 			cb.outgoingIDs.Delete(ev.ReplyTo)
@@ -310,13 +295,16 @@ func (cb *ChatBot) emitEvent(eventType string, data interface{}) {
 	}
 }
 
+func (cb *ChatBot) Logger() logger.Log {
+	return cb.logger
+}
+
 func (cb *ChatBot) SendPrivately(user *ChatUser, threadTimestamp string, s string, args ...interface{}) (*ChatReply, error) {
 	// FUUUUUUUUUUUUUUU
 	// need to reach out via regular api in order to open a channel with user
 	// it *might* be already open, but we don't care
 	_, _, channelID, err := cb.slackAPI.OpenIMChannel(user.ID())
 	if err != nil {
-		fmt.Println("im.open", err)
 		return nil, err
 	}
 
@@ -348,14 +336,15 @@ func (cb *ChatBot) Send(target ChatTarget, threadTimestamp string, s string, arg
 
 	cb.outgoingIDs.Store(msg.ID, cr)
 
-	fmt.Printf(">> %s: %s\n", target.ID(), text)
+	ll := cb.Logger().WithField("target_id", target.ID()).WithField("thread", threadTimestamp).WithField("text", text)
+	ll.Debug("outgoing message")
 	cb.slackRTM.SendMessage(msg)
 
 	select {
 	case <-ch:
 		return cr, cr.bindErr
 	case <-time.After(ackTimeout):
-		fmt.Println("didn't ack msg on time")
+		ll.Error("did not ack message")
 	}
 
 	return nil, errors.New("could not confirm msg was sent")
@@ -379,7 +368,8 @@ func parseArguments(specArgs []chatArg, msg *ChatMessage) error {
 
 		if HasMarker(token) {
 			if !canNamed {
-				fmt.Println("switching from positional to named not allowed")
+				msg.Logger.WithField("args", msg.RawArgs).Error("switching from positional to name not allowed")
+				return errors.New("mixed argument mode")
 			}
 			argName, argValue := SplitMarker(token)
 
@@ -419,17 +409,26 @@ func parseArguments(specArgs []chatArg, msg *ChatMessage) error {
 	return nil
 }
 
-func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
-	userName, _ := cb.NameForID(ev.User)
-	userTarget := &ChatUser{
-		id:   ev.User,
-		name: userName,
+func (cb *ChatBot) userFor(id string, name string) *ChatUser {
+	return &ChatUser{
+		ll:   cb.Logger(),
+		bot:  cb,
+		id:   id,
+		name: name,
 	}
+}
 
-	channelName, _ := cb.NameForID(ev.Channel)
+func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
+	isPrivate := false
+
+	userName, _ := cb.directory.userForID(ev.User)
+	userTarget := cb.userFor(ev.User, userName)
+
+	channelName, _ := cb.directory.channelForID(ev.Channel)
+
 	// this is a direct message
 	if ev.Channel[0] == 'D' {
-		channelName = userName
+		isPrivate = true
 	}
 
 	channelTarget := &ChatChannel{
@@ -450,13 +449,22 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 		}
 	}
 
+	ll := cb.Logger().
+		WithField("from", userTarget.Name()).
+		WithField("channel", channelTarget.Name()).
+		WithField("text", ev.Text)
+
+	ll.Info("incoming message")
+
 	if len(handlers) == 0 {
 		if cb.defaultHandler != nil {
 			msg := &ChatMessage{
+				Logger:          ll,
 				Body:            ev.Text,
 				Timestamp:       ev.Timestamp,
 				ThreadTimestamp: ev.ThreadTimestamp,
 				Bot:             cb,
+				IsPrivate:       isPrivate,
 				Args:            ChatArgs{},
 				User:            userTarget,
 				Channel:         channelTarget,
@@ -469,12 +477,14 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 
 	for _, ca := range handlers {
 		msg := &ChatMessage{
+			Logger:          ll,
 			Body:            ev.Text,
 			RawArgs:         rawArgs,
 			Match:           pattern,
 			Timestamp:       ev.Timestamp,
 			ThreadTimestamp: ev.ThreadTimestamp,
 			Bot:             cb,
+			IsPrivate:       isPrivate,
 			Args:            ChatArgs{},
 			User:            userTarget,
 			Channel:         channelTarget,
@@ -489,7 +499,6 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 }
 
 func (cb *ChatBot) handleError(msg *ChatMessage, err error) {
-	fmt.Println("asdlfasdkjfhaskjldhfasdf")
 	switch err {
 	case nil:
 		return
@@ -501,28 +510,22 @@ func (cb *ChatBot) handleError(msg *ChatMessage, err error) {
 	}
 }
 
-func (cb *ChatBot) AddAuthHandler(site string, authHandler ChatAuthHandler) error {
-	if _, ok := cb.authHandlers[site]; ok {
+func (cb *ChatBot) AddAuthHandler(authHandler ChatAuthHandler) error {
+	if _, ok := cb.authHandlers[authHandler.Name()]; ok {
 		return errors.New("site already present")
 	}
 
-	cb.authHandlers[site] = authHandler
+	cb.authHandlers[authHandler.Name()] = authHandler
 	return nil
 }
 
-func (cb *ChatBot) AuthUser(user *ChatUser, site string, role string) (*ChatExternalUser, error) {
+func (cb *ChatBot) AuthorizeUser(user *ChatUser, site string, role string) (ChatExternalUser, error) {
 	handler, ok := cb.authHandlers[site]
 	if !ok {
 		return nil, errors.New("no handler for site")
 	}
 
-	ceu, err := handler(user, role)
-	if err != nil {
-		return nil, err
-	}
-
-	ceu.site = site
-	return ceu, nil
+	return handler.Authorize(user, role)
 }
 
 func (cb *ChatBot) AddEventHandler(eventType string, handler ChatEventHandler) error {
@@ -542,22 +545,4 @@ func (cb *ChatBot) AddMessageHandler(pattern string, handler ChatMessageHandler,
 
 	cb.chatHandlers[pattern] = append(cb.chatHandlers[pattern], ca)
 	return nil
-}
-
-type ChatTarget interface {
-	Name() string
-	ID() string
-}
-
-type ChatChannel struct {
-	name string
-	id   string
-}
-
-func (ct *ChatChannel) Name() string {
-	return ct.name
-}
-
-func (ct *ChatChannel) ID() string {
-	return ct.id
 }
