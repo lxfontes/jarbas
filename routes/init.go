@@ -25,9 +25,7 @@ func (th *trackHandler) OnChatMessage(msg *chat.ChatMessage) error {
 
 	th.trackMoji[cr.Timestamp] = 0
 
-	fmt.Printf("chatreply: %v\n", cr)
-
-	return nil
+	return msg.Bot.ReactToMessage(msg, "aw_yeah")
 }
 
 func (th *trackHandler) OnChatEvent(ev *chat.ChatEvent) error {
@@ -61,5 +59,18 @@ func RegisterHandlers(b *chat.ChatBot) error {
 	b.AddMessageHandler("track", th)
 
 	b.AddEventHandler(chat.EventReaction, th)
+
+	gl := &githubLink{}
+	b.AddMessageHandler(githubFetchCommand,
+		gl,
+		chat.WithRequiredArg("id", "link id"),
+	)
+	b.AddMessageHandler(githubSaveCommand,
+		gl,
+		chat.WithRequiredArg("id", "link id"),
+		chat.WithRequiredArg("link", "link itself"),
+	)
+
+	b.AddAuthHandler("github", gl.authHandler)
 	return nil
 }

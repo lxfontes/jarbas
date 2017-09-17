@@ -1,14 +1,18 @@
 package chat
 
-type ChatMessage struct {
-	Timestamp       string
-	ThreadTimestamp string
-	Bot             *ChatBot
-	Channel         *ChatTarget
-	User            *ChatTarget
-	Args            ChatArgs
+import "fmt"
 
+type ChatMessage struct {
+	Bot             *ChatBot
+	Timestamp       string
+	Channel         ChatTarget
+	User            *ChatUser
+	Args            ChatArgs
+	ThreadTimestamp string
+
+	Match     string
 	Body      string
+	RawArgs   string
 	IsPrivate bool
 }
 
@@ -24,7 +28,7 @@ func (cm *ChatMessage) InclusionArg(arg string, vals ...string) (string, bool) {
 	return cm.Args.Inclusion(arg, vals...)
 }
 
-func (cm *ChatMessage) Thread(s string, args ...interface{}) (*ChatReply, error) {
+func (cm *ChatMessage) ReplyInThread(s string, args ...interface{}) (*ChatReply, error) {
 	thread := cm.Timestamp
 
 	// respond to the main thread if we are already in one
@@ -39,10 +43,15 @@ func (cm *ChatMessage) Reply(s string, args ...interface{}) (*ChatReply, error) 
 	return cm.Bot.Send(cm.Channel, "", s, args...)
 }
 
-func (cm *ChatMessage) ReplyWithMention(msg string) error {
-	return nil
+func (cm *ChatMessage) ReplyWithMention(s string, args ...interface{}) (*ChatReply, error) {
+	combined := fmt.Sprintf("<@%s> %s", cm.User.ID(), s)
+	return cm.Bot.Send(cm.Channel, "", combined, args...)
 }
 
-func (cm *ChatMessage) ReplyPrivately(msg string) error {
-	return nil
+func (cm *ChatMessage) ReplyPrivately(s string, args ...interface{}) (*ChatReply, error) {
+	return cm.Bot.SendPrivately(cm.User, "", s, args...)
+}
+
+func (cm *ChatMessage) AddReaction(reaction string) error {
+	return cm.Bot.ReactToMessage(cm, reaction)
 }

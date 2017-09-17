@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/lxfontes/jarbas/store"
 	"github.com/nlopes/slack"
 )
 
@@ -30,7 +30,7 @@ type ChatReply struct {
 	Bot *ChatBot
 
 	Text      string
-	Target    *ChatTarget
+	Target    ChatTarget
 	Timestamp string
 	Id        int
 
@@ -60,13 +60,13 @@ type ChatEventConnection struct {
 
 type ChatEventPresence struct {
 	Status string
-	User   *ChatTarget
+	User   *ChatUser
 }
 
 type ChatEventReaction struct {
 	Timestamp string
-	User      *ChatTarget
-	Channel   *ChatTarget
+	User      *ChatUser
+	Channel   ChatTarget
 	Reaction  string
 	Removed   bool
 }
@@ -85,27 +85,75 @@ type chatArg struct {
 
 type ChatErrorHandler func(handler ChatHandler, err error)
 
+type ChatExternalUser struct {
+	user  *ChatUser
+	site  string
+	name  string
+	id    string
+	token string
+}
+
+func (ceu *ChatExternalUser) User() *ChatUser {
+	return ceu.user
+}
+
+func (ceu *ChatExternalUser) Site() string {
+	return ceu.site
+}
+
+func (ceu *ChatExternalUser) Name() string {
+	return ceu.name
+}
+
+func (ceu *ChatExternalUser) ID() string {
+	return ceu.id
+}
+
+func (ceu *ChatExternalUser) Token() string {
+	return ceu.token
+}
+
+func NewChatExternalUser(user *ChatUser, name string, id string, token string) *ChatExternalUser {
+	return &ChatExternalUser{
+		user:  user,
+		name:  name,
+		id:    id,
+		token: token,
+	}
+}
+
+var ErrUserAuthNeeded = errors.New("need auth for site")
+
+type ChatAuthHandler func(user *ChatUser, role string) (*ChatExternalUser, error)
+
 type ChatBot struct {
 	chatHandlers   map[string][]*chatAction // indexed by command, ex: 'say'
 	eventHandlers  map[string][]ChatEventHandler
+	authHandlers   map[string]ChatAuthHandler
 	defaultHandler *chatAction
 	errorHander    *ChatErrorHandler
 
 	slackAPI *slack.Client
 	slackRTM *slack.RTM
 
-	outgoingIDs     sync.Map
+	outgoingIDs sync.Map // used to track outgoing message timestamps (ChatReply)
+
+	// keeps an in-memory representation of our workspace
 	channelIDToName map[string]string
 	userIDToName    map[string]string
+
+	store store.Store
 }
 
 func NewChatBot(token string) (*ChatBot, error) {
 	return &ChatBot{
 		chatHandlers:    map[string][]*chatAction{},
 		eventHandlers:   map[string][]ChatEventHandler{},
+		authHandlers:    map[string]ChatAuthHandler{},
 		slackAPI:        slack.New(token),
 		channelIDToName: map[string]string{},
 		userIDToName:    map[string]string{},
+		store:           store.NewMemoryStore(),
 	}, nil
 }
 
@@ -114,12 +162,17 @@ func (cb *ChatBot) connectionSetup(ev *slack.ConnectedEvent) {
 	cb.userIDToName = map[string]string{}
 
 	for _, user := range ev.Info.Users {
+		fmt.Println(user.ID, user.Name)
 		cb.userIDToName[user.ID] = user.Name
 	}
 
 	for _, channel := range ev.Info.Channels {
 		cb.channelIDToName[channel.ID] = channel.Name
 	}
+}
+
+func (cb *ChatBot) Store() store.Store {
+	return cb.store
 }
 
 func (cb *ChatBot) NameForID(id string) (string, bool) {
@@ -160,13 +213,15 @@ func (cb *ChatBot) Serve() {
 			if ev.SubType == "message_replied" {
 				continue
 			}
+			fmt.Printf("%+v\n", ev)
 			go cb.handleMessage(ev)
 
 		case *slack.PresenceChangeEvent:
 			name, _ := cb.NameForID(ev.User)
 			cr := &ChatEventPresence{
 				Status: ev.Presence,
-				User: &ChatTarget{
+				User: &ChatUser{
+					bot:  cb,
 					id:   ev.User,
 					name: name,
 				},
@@ -189,11 +244,12 @@ func (cb *ChatBot) Serve() {
 			cr := &ChatEventReaction{
 				Timestamp: ev.Item.Timestamp,
 				Reaction:  ev.Reaction,
-				User: &ChatTarget{
+				User: &ChatUser{
+					bot:  cb,
 					id:   ev.User,
 					name: userName,
 				},
-				Channel: &ChatTarget{
+				Channel: &ChatChannel{
 					id:   ev.Item.Channel,
 					name: channelName,
 				},
@@ -207,11 +263,13 @@ func (cb *ChatBot) Serve() {
 				Timestamp: ev.Item.Timestamp,
 				Reaction:  ev.Reaction,
 				Removed:   true,
-				User: &ChatTarget{
+				User: &ChatUser{
+					bot:  cb,
 					id:   ev.User,
 					name: userName,
 				},
-				Channel: &ChatTarget{
+				Channel: &ChatUser{
+					bot:  cb,
 					id:   ev.Item.Channel,
 					name: channelName,
 				},
@@ -252,11 +310,25 @@ func (cb *ChatBot) emitEvent(eventType string, data interface{}) {
 	}
 }
 
-func formatTarget(name string) string {
-	return name
+func (cb *ChatBot) SendPrivately(user *ChatUser, threadTimestamp string, s string, args ...interface{}) (*ChatReply, error) {
+	// FUUUUUUUUUUUUUUU
+	// need to reach out via regular api in order to open a channel with user
+	// it *might* be already open, but we don't care
+	_, _, channelID, err := cb.slackAPI.OpenIMChannel(user.ID())
+	if err != nil {
+		fmt.Println("im.open", err)
+		return nil, err
+	}
+
+	target := &ChatChannel{
+		name: user.Name(),
+		id:   channelID,
+	}
+
+	return cb.Send(target, threadTimestamp, s, args...)
 }
 
-func (cb *ChatBot) Send(target *ChatTarget, threadTimestamp string, s string, args ...interface{}) (*ChatReply, error) {
+func (cb *ChatBot) Send(target ChatTarget, threadTimestamp string, s string, args ...interface{}) (*ChatReply, error) {
 	text := fmt.Sprintf(s, args...)
 
 	cr := &ChatReply{
@@ -265,7 +337,7 @@ func (cb *ChatBot) Send(target *ChatTarget, threadTimestamp string, s string, ar
 		Target: target,
 	}
 
-	msg := cb.slackRTM.NewOutgoingMessage(text, formatTarget(target.Id()))
+	msg := cb.slackRTM.NewOutgoingMessage(text, target.ID())
 	msg.ThreadTimestamp = threadTimestamp
 
 	ch := make(chan struct{})
@@ -276,6 +348,7 @@ func (cb *ChatBot) Send(target *ChatTarget, threadTimestamp string, s string, ar
 
 	cb.outgoingIDs.Store(msg.ID, cr)
 
+	fmt.Printf(">> %s: %s\n", target.ID(), text)
 	cb.slackRTM.SendMessage(msg)
 
 	select {
@@ -288,9 +361,67 @@ func (cb *ChatBot) Send(target *ChatTarget, threadTimestamp string, s string, ar
 	return nil, errors.New("could not confirm msg was sent")
 }
 
+func (cb *ChatBot) ReactToMessage(msg *ChatMessage, reaction string) error {
+	msgRef := slack.NewRefToMessage(msg.Channel.ID(), msg.Timestamp)
+	return cb.slackAPI.AddReaction(reaction, msgRef)
+}
+
+func parseArguments(specArgs []chatArg, msg *ChatMessage) error {
+	scanner := bufio.NewScanner(strings.NewReader(msg.RawArgs))
+	scanner.Split(ScanQuotedWords)
+
+	argStack := make([]chatArg, len(specArgs))
+	copy(argStack, specArgs)
+	// we cannot rely on positional arg after a named arg
+	canNamed := true
+	for scanner.Scan() {
+		token := scanner.Text()
+
+		if HasMarker(token) {
+			if !canNamed {
+				fmt.Println("switching from positional to named not allowed")
+			}
+			argName, argValue := SplitMarker(token)
+
+			for i := 0; i < len(argStack); i++ {
+				arg := argStack[i]
+				if strings.ToLower(argName) == arg.name {
+					msg.Args[arg.name] = argValue
+					argStack = append(argStack[:i], argStack[i+1:]...)
+					break
+				}
+			}
+
+			continue
+		}
+
+		// no gymnastics, just pop an argument
+		var arg chatArg
+		canNamed = false
+		arg, argStack = argStack[0], argStack[1:]
+		msg.Args[arg.name] = token
+	}
+
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+
+	// apply optionals & fail defaults
+	for _, arg := range argStack {
+		if arg.required == true {
+			return errors.New("missed required arg" + arg.name)
+			continue // remove this
+		}
+
+		msg.Args[arg.name] = arg.defValue
+	}
+
+	return nil
+}
+
 func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 	userName, _ := cb.NameForID(ev.User)
-	userTarget := &ChatTarget{
+	userTarget := &ChatUser{
 		id:   ev.User,
 		name: userName,
 	}
@@ -301,18 +432,20 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 		channelName = userName
 	}
 
-	channelTarget := &ChatTarget{
+	channelTarget := &ChatChannel{
 		id:   ev.Channel,
 		name: channelName,
 	}
 
 	var handlers []*chatAction
-	var params string
+	var rawArgs string
+	var pattern string
 
-	for pattern, ch := range cb.chatHandlers {
-		if strings.HasPrefix(ev.Text, pattern) {
+	for p, ch := range cb.chatHandlers {
+		if strings.HasPrefix(ev.Text, p) {
 			handlers = ch
-			params = strings.TrimPrefix(ev.Text, pattern)
+			pattern = p
+			rawArgs = strings.TrimSpace(strings.TrimPrefix(ev.Text, p))
 			break
 		}
 	}
@@ -320,6 +453,7 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 	if len(handlers) == 0 {
 		if cb.defaultHandler != nil {
 			msg := &ChatMessage{
+				Body:            ev.Text,
 				Timestamp:       ev.Timestamp,
 				ThreadTimestamp: ev.ThreadTimestamp,
 				Bot:             cb,
@@ -327,8 +461,7 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 				User:            userTarget,
 				Channel:         channelTarget,
 			}
-			cb.defaultHandler.handler.OnChatMessage(msg)
-
+			cb.handleError(msg, cb.defaultHandler.handler.OnChatMessage(msg))
 		}
 
 		return
@@ -336,6 +469,9 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 
 	for _, ca := range handlers {
 		msg := &ChatMessage{
+			Body:            ev.Text,
+			RawArgs:         rawArgs,
+			Match:           pattern,
 			Timestamp:       ev.Timestamp,
 			ThreadTimestamp: ev.ThreadTimestamp,
 			Bot:             cb,
@@ -344,57 +480,49 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 			Channel:         channelTarget,
 		}
 
-		scanner := bufio.NewScanner(strings.NewReader(params))
-		scanner.Split(ScanQuotedWords)
-
-		argStack := make([]chatArg, len(ca.args))
-		copy(argStack, ca.args)
-		// we cannot rely on positional arg after a named arg
-		canNamed := true
-		for scanner.Scan() {
-			token := scanner.Text()
-
-			if HasMarker(token) {
-				if !canNamed {
-					fmt.Println("switching from positional to named not allowed")
-				}
-				argName, argValue := SplitMarker(token)
-
-				for i := 0; i < len(argStack); i++ {
-					arg := argStack[i]
-					if strings.ToLower(argName) == arg.name {
-						msg.Args[arg.name] = argValue
-						argStack = append(argStack[:i], argStack[i+1:]...)
-						break
-					}
-				}
-
-				continue
-			}
-
-			// no gymnastics, just pop an argument
-			var arg chatArg
-			canNamed = false
-			arg, argStack = argStack[0], argStack[1:]
-			msg.Args[arg.name] = token
+		if len(ca.args) > 0 {
+			parseArguments(ca.args, msg)
 		}
 
-		if err := scanner.Err(); err != nil {
-			fmt.Fprintln(os.Stderr, "scanning arguments:", err)
-		}
-
-		// apply optionals & fail defaults
-		for _, arg := range argStack {
-			if arg.required == true {
-				fmt.Println("missed required arg", arg.name)
-				continue // remove this
-			}
-
-			msg.Args[arg.name] = arg.defValue
-		}
-
-		ca.handler.OnChatMessage(msg)
+		cb.handleError(msg, ca.handler.OnChatMessage(msg))
 	}
+}
+
+func (cb *ChatBot) handleError(msg *ChatMessage, err error) {
+	fmt.Println("asdlfasdkjfhaskjldhfasdf")
+	switch err {
+	case nil:
+		return
+	case ErrUserAuthNeeded:
+		msg.ReplyPrivately("Auth needed")
+	default:
+		msg.ReplyPrivately("Your last command emmited an error")
+		msg.ReplyPrivately("%+v", err)
+	}
+}
+
+func (cb *ChatBot) AddAuthHandler(site string, authHandler ChatAuthHandler) error {
+	if _, ok := cb.authHandlers[site]; ok {
+		return errors.New("site already present")
+	}
+
+	cb.authHandlers[site] = authHandler
+	return nil
+}
+
+func (cb *ChatBot) AuthUser(user *ChatUser, site string, role string) (*ChatExternalUser, error) {
+	handler, ok := cb.authHandlers[site]
+	if !ok {
+		return nil, errors.New("no handler for site")
+	}
+
+	ceu, err := handler(user, role)
+	if err != nil {
+		return nil, err
+	}
+
+	ceu.site = site
+	return ceu, nil
 }
 
 func (cb *ChatBot) AddEventHandler(eventType string, handler ChatEventHandler) error {
@@ -412,23 +540,24 @@ func (cb *ChatBot) AddMessageHandler(pattern string, handler ChatMessageHandler,
 		opt(ca)
 	}
 
-	if len(ca.args) > 0 {
-		pattern = pattern + " " // this seems wrong
-	}
-
 	cb.chatHandlers[pattern] = append(cb.chatHandlers[pattern], ca)
 	return nil
 }
 
-type ChatTarget struct {
+type ChatTarget interface {
+	Name() string
+	ID() string
+}
+
+type ChatChannel struct {
 	name string
 	id   string
 }
 
-func (ct *ChatTarget) Name() string {
+func (ct *ChatChannel) Name() string {
 	return ct.name
 }
 
-func (ct *ChatTarget) Id() string {
+func (ct *ChatChannel) ID() string {
 	return ct.id
 }

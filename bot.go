@@ -10,6 +10,5 @@ import (
 func main() {
 	b, _ := chat.NewChatBot(os.Getenv("SLACK_TOKEN"))
 	routes.RegisterHandlers(b)
-
 	b.Serve()
 }
