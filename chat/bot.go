@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -350,9 +351,14 @@ func (cb *ChatBot) Send(target ChatTarget, threadTimestamp string, s string, arg
 	return nil, errors.New("could not confirm msg was sent")
 }
 
-func (cb *ChatBot) ReactToMessage(msg *ChatMessage, reaction string) error {
+func (cb *ChatBot) AddReaction(msg *ChatMessage, reaction string) error {
 	msgRef := slack.NewRefToMessage(msg.Channel.ID(), msg.Timestamp)
 	return cb.slackAPI.AddReaction(reaction, msgRef)
+}
+
+func (cb *ChatBot) RemoveReaction(msg *ChatMessage, reaction string) error {
+	msgRef := slack.NewRefToMessage(msg.Channel.ID(), msg.Timestamp)
+	return cb.slackAPI.RemoveReaction(reaction, msgRef)
 }
 
 func parseArguments(specArgs []chatArg, msg *ChatMessage) error {
@@ -418,8 +424,39 @@ func (cb *ChatBot) userFor(id string, name string) *ChatUser {
 	}
 }
 
+var reUnformat = regexp.MustCompile("<([^>]+)>")
+
+func (cb *ChatBot) unformat(rawText string) string {
+	// split on <>
+	// if a | is found (fallback text), use it
+	// if a '@' is found, look for userid mention
+	var unwrapperFn = func(s string) string {
+		mm := reUnformat.FindStringSubmatch(s)
+		if len(mm) == 0 {
+			return s
+		}
+
+		pattern := mm[1]
+		parts := strings.SplitN(pattern, "|", 2)
+		if len(parts) == 2 {
+			return parts[1]
+		}
+
+		if pattern[0] == '@' {
+			id, _ := cb.directory.userForID(pattern[1:])
+			return id
+		}
+
+		return pattern
+	}
+
+	return reUnformat.ReplaceAllStringFunc(rawText, unwrapperFn)
+}
+
 func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 	isPrivate := false
+	rawText := ev.Text
+	plainText := cb.unformat(rawText)
 
 	userName, _ := cb.directory.userForID(ev.User)
 	userTarget := cb.userFor(ev.User, userName)
@@ -441,10 +478,10 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 	var pattern string
 
 	for p, ch := range cb.chatHandlers {
-		if strings.HasPrefix(ev.Text, p) {
+		if strings.HasPrefix(plainText, p) {
 			handlers = ch
 			pattern = p
-			rawArgs = strings.TrimSpace(strings.TrimPrefix(ev.Text, p))
+			rawArgs = strings.TrimSpace(strings.TrimPrefix(plainText, p))
 			break
 		}
 	}
@@ -452,7 +489,8 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 	ll := cb.Logger().
 		WithField("from", userTarget.Name()).
 		WithField("channel", channelTarget.Name()).
-		WithField("text", ev.Text)
+		WithField("text", rawText).
+		WithField("plain_text", plainText)
 
 	ll.Info("incoming message")
 
@@ -460,7 +498,8 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 		if cb.defaultHandler != nil {
 			msg := &ChatMessage{
 				Logger:          ll,
-				Body:            ev.Text,
+				Text:            rawText,
+				PlainText:       plainText,
 				Timestamp:       ev.Timestamp,
 				ThreadTimestamp: ev.ThreadTimestamp,
 				Bot:             cb,
@@ -478,7 +517,8 @@ func (cb *ChatBot) handleMessage(ev *slack.MessageEvent) {
 	for _, ca := range handlers {
 		msg := &ChatMessage{
 			Logger:          ll,
-			Body:            ev.Text,
+			Text:            rawText,
+			PlainText:       plainText,
 			RawArgs:         rawArgs,
 			Match:           pattern,
 			Timestamp:       ev.Timestamp,

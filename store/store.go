@@ -3,27 +3,35 @@ package store
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"sync"
+	"time"
 )
 
 type Storable interface {
 	StoreID() string
+	// StoreExpires is a hint for stores on how durable this information is
+	// leave blank for no expiration
+	StoreExpires() time.Time
+}
+
+type Namespace interface {
+	FindByID(id string, out interface{}) error
+	Save(item Storable) error
+	Delete(id string) error
 }
 
 type Store interface {
-	FindByID(collection string, id string, out interface{}) error
-	Save(collection string, item Storable) error
-	Delete(collection string, id string) error
+	Namespace(name string) Namespace
 }
 
 var ErrItemNotFound = errors.New("not found")
 
 var _ Store = &memStore{}
+var _ Namespace = storage{}
 
 type storage map[string][]byte
 
-func (s storage) findByID(id string, out interface{}) error {
+func (s storage) FindByID(id string, out interface{}) error {
 	rawItem, ok := s[id]
 	if !ok {
 		return ErrItemNotFound
@@ -32,12 +40,12 @@ func (s storage) findByID(id string, out interface{}) error {
 	return json.Unmarshal(rawItem, out)
 }
 
-func (s storage) delete(id string) error {
+func (s storage) Delete(id string) error {
 	delete(s, id)
 	return nil
 }
 
-func (s storage) save(item Storable) error {
+func (s storage) Save(item Storable) error {
 	rw, err := json.Marshal(item)
 	if err != nil {
 		return err
@@ -58,38 +66,12 @@ func NewMemoryStore() *memStore {
 	}
 }
 
-func (ms *memStore) FindByID(collection string, id string, out interface{}) error {
-	ms.mtx.Lock()
-	defer ms.mtx.Unlock()
-
-	fmt.Println("Looking up", collection, id)
-
-	if _, ok := ms.things[collection]; !ok {
-		ms.things[collection] = storage{}
-	}
-
-	return ms.things[collection].findByID(id, out)
-}
-
-func (ms *memStore) Save(collection string, item Storable) error {
-	ms.mtx.Lock()
-	defer ms.mtx.Unlock()
-
-	if _, ok := ms.things[collection]; !ok {
-		ms.things[collection] = storage{}
-	}
-
-	return ms.things[collection].save(item)
-}
-
-func (ms *memStore) Delete(collection string, id string) error {
-	ms.mtx.Lock()
-	defer ms.mtx.Unlock()
-
-	col, ok := ms.things[collection]
+func (ms *memStore) Namespace(name string) Namespace {
+	namespace, ok := ms.things[name]
 	if !ok {
-		return nil // no collection
+		namespace = storage{}
+		ms.things[name] = namespace
 	}
 
-	return col.delete(id)
+	return namespace
 }

@@ -1,4 +1,4 @@
-package routes
+package commands
 
 import (
 	"fmt"
@@ -25,7 +25,7 @@ func (th *trackHandler) OnChatMessage(msg *chat.ChatMessage) error {
 
 	th.trackMoji[cr.Timestamp] = 0
 
-	return msg.Bot.ReactToMessage(msg, "aw_yeah")
+	return msg.Bot.AddReaction(msg, "aw_yeah")
 }
 
 func (th *trackHandler) OnChatEvent(ev *chat.ChatEvent) error {
@@ -62,6 +62,9 @@ func RegisterHandlers(b *chat.ChatBot) error {
 
 	tt := &testHandler{}
 	b.AddMessageHandler("auth github", tt)
+
+	rt := &runHandler{}
+	b.AddMessageHandler("run", rt)
 
 	return nil
 }

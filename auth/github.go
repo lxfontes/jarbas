@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"time"
+
 	"github.com/lxfontes/jarbas/chat"
 	"github.com/lxfontes/jarbas/store"
 )
@@ -42,6 +44,10 @@ func (gd *GithubAuthData) StoreID() string {
 	return gd.UserID
 }
 
+func (gd *GithubAuthData) StoreExpires() time.Time {
+	return time.Time{}
+}
+
 func (gd *GithubAuthData) Validate() error {
 	if gd.LoginCount > 5 {
 		return chat.ErrUserAuthNeeded
@@ -60,7 +66,7 @@ func (gl *githubAuth) Name() string {
 func (gl *githubAuth) Authorize(user *chat.ChatUser, role string) (chat.ChatExternalUser, error) {
 	authData := &GithubAuthData{}
 	userStore := user.Bot().Store()
-	err := userStore.FindByID(githubAuthCollection, user.ID(), authData)
+	err := userStore.Namespace(githubAuthCollection).FindByID(user.ID(), authData)
 
 	if err != nil && err != store.ErrItemNotFound {
 		return nil, err
@@ -82,7 +88,7 @@ func (gl *githubAuth) Authorize(user *chat.ChatUser, role string) (chat.ChatExte
 
 	//  update login counter
 	authData.LoginCount++
-	if err = userStore.Save(githubAuthCollection, authData); err != nil {
+	if err = userStore.Namespace(githubAuthCollection).Save(authData); err != nil {
 		return nil, err
 	}
 

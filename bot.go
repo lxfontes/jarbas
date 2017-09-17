@@ -5,7 +5,8 @@ import (
 
 	"github.com/lxfontes/jarbas/auth"
 	"github.com/lxfontes/jarbas/chat"
-	"github.com/lxfontes/jarbas/routes"
+	"github.com/lxfontes/jarbas/commands"
+	"github.com/lxfontes/jarbas/reactions"
 )
 
 type pluginInitializer func(*chat.ChatBot) error
@@ -15,7 +16,8 @@ func main() {
 
 	for _, initializer := range []pluginInitializer{
 		auth.RegisterHandlers,
-		routes.RegisterHandlers,
+		commands.RegisterHandlers,
+		reactions.RegisterHandlers,
 	} {
 		if err := initializer(b); err != nil {
 			panic(err)

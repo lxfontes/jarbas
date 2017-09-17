@@ -16,7 +16,8 @@ type ChatMessage struct {
 	Logger          logger.Log
 
 	Match     string
-	Body      string
+	Text      string
+	PlainText string
 	RawArgs   string
 	IsPrivate bool
 }
@@ -58,7 +59,11 @@ func (cm *ChatMessage) ReplyPrivately(s string, args ...interface{}) (*ChatReply
 }
 
 func (cm *ChatMessage) AddReaction(reaction string) error {
-	return cm.Bot.ReactToMessage(cm, reaction)
+	return cm.Bot.AddReaction(cm, reaction)
+}
+
+func (cm *ChatMessage) RemoveReaction(reaction string) error {
+	return cm.Bot.RemoveReaction(cm, reaction)
 }
 
 func (cm *ChatMessage) AuthorizeUser(site string, role string) (ChatExternalUser, error) {

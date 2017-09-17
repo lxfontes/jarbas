@@ -1,4 +1,4 @@
-package routes
+package commands
 
 import (
 	"github.com/lxfontes/jarbas/auth"

@@ -13,6 +13,15 @@ func (ca ChatArgs) String(parameter string) (string, bool) {
 	return s, ok
 }
 
+func (ca ChatArgs) Keys() []string {
+	ret := []string{}
+	for k, _ := range ca {
+		ret = append(ret, k)
+	}
+
+	return ret
+}
+
 func (ca ChatArgs) Int(parameter string) (int, bool) {
 	v, ok := ca.String(parameter)
 	i, err := strconv.Atoi(v)
