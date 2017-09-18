@@ -41,6 +41,7 @@ func (sh *shellHandler) OnChatMessage(msg *ChatMessage) error {
 			envKey := fmt.Sprintf("JARBAS_ARG_%s", envify(key))
 			envVal, _ := msg.StringArg(key)
 			msg.Logger.WithField("key", envKey).WithField("val", envVal).Info("env var")
+			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", envKey, envVal))
 		}
 
 		out, err := cmd.Output()
@@ -50,11 +51,12 @@ func (sh *shellHandler) OnChatMessage(msg *ChatMessage) error {
 			return
 		}
 
-		msg.ReplyInThread(fmt.Sprintf("```\n%s\n```", string(out)))
+		msg.AddReaction("joy")
+		msg.ReplyInThread("%s", fmt.Sprintf("```\n%s\n```", string(out)))
 	}()
 	return nil
 }
 
 func envify(k string) string {
-	return strings.Replace(strings.ToUpper(k), "_", "-", 0)
+	return strings.Replace(strings.ToUpper(k), "-", "_", -1)
 }

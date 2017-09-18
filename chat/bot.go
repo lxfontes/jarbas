@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"sync"
@@ -548,6 +549,29 @@ func (cb *ChatBot) handleError(msg *ChatMessage, err error) {
 		msg.ReplyPrivately("Your last command emmited an error")
 		msg.ReplyPrivately("%+v", err)
 	}
+}
+
+func (cb *ChatBot) SendFile(target ChatTarget, name string, title string, rc io.Reader) error {
+	_, err := cb.slackAPI.UploadFile(slack.FileUploadParameters{
+		Filename: name,
+		Reader:   rc,
+		Title:    title,
+		Channels: []string{target.ID()},
+	})
+
+	return err
+}
+
+func (cb *ChatBot) SendSnippet(target ChatTarget, name string, title string, snippetType string, snippet string) error {
+	_, err := cb.slackAPI.UploadFile(slack.FileUploadParameters{
+		Filename: name,
+		Title:    title,
+		Filetype: snippetType,
+		Content:  snippet,
+		Channels: []string{target.ID()},
+	})
+
+	return err
 }
 
 func (cb *ChatBot) AddAuthHandler(authHandler ChatAuthHandler) error {

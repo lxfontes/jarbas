@@ -61,10 +61,18 @@ func RegisterHandlers(b *chat.ChatBot) error {
 	b.AddEventHandler(chat.EventReaction, th)
 
 	tt := &testHandler{}
-	b.AddMessageHandler("auth github", tt)
+	b.AddMessageHandler(saveLog, tt)
+	b.AddMessageHandler(showLog, tt)
 
-	rt := &runHandler{}
-	b.AddMessageHandler("run", rt)
+	b.AddMessageHandler("ping",
+		chat.NewShellHandler("ping", "ping that"),
+		chat.WithRequiredArg("host", "host to ping"),
+	)
+
+	b.AddMessageHandler("say",
+		chat.NewShellHandler("say", "say something"),
+		chat.WithRequiredArg("say-text", "text to say"),
+	)
 
 	return nil
 }

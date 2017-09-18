@@ -9,11 +9,16 @@ import (
 type Log interface {
 	WithField(key string, value interface{}) Log
 	WithError(err error) Log
-	Debug(string, ...interface{})
-	Error(string, ...interface{})
-	Fatal(string, ...interface{})
-	Info(string, ...interface{})
-	Warning(string, ...interface{})
+	Debug(...interface{})
+	Debugf(string, ...interface{})
+	Error(...interface{})
+	Errorf(string, ...interface{})
+	Fatal(...interface{})
+	Fatalf(string, ...interface{})
+	Info(...interface{})
+	Infof(string, ...interface{})
+	Warning(...interface{})
+	Warningf(string, ...interface{})
 }
 
 var _ Log = &logrusBridge{}
@@ -27,23 +32,44 @@ func (lb *logrusBridge) WithError(err error) Log {
 		log: lb.log.WithError(err),
 	}
 }
-func (lb *logrusBridge) Debug(s string, opts ...interface{}) {
+
+func (lb *logrusBridge) Debug(opts ...interface{}) {
+	lb.log.Debug(opts...)
+}
+
+func (lb *logrusBridge) Debugf(s string, opts ...interface{}) {
 	lb.log.Debugf(s, opts...)
 }
 
-func (lb *logrusBridge) Error(s string, opts ...interface{}) {
+func (lb *logrusBridge) Error(opts ...interface{}) {
+	lb.log.Error(opts...)
+}
+
+func (lb *logrusBridge) Errorf(s string, opts ...interface{}) {
 	lb.log.Errorf(s, opts...)
 }
 
-func (lb *logrusBridge) Fatal(s string, opts ...interface{}) {
+func (lb *logrusBridge) Fatal(opts ...interface{}) {
+	lb.log.Fatal(opts...)
+}
+
+func (lb *logrusBridge) Fatalf(s string, opts ...interface{}) {
 	lb.log.Fatalf(s, opts...)
 }
 
-func (lb *logrusBridge) Warning(s string, opts ...interface{}) {
+func (lb *logrusBridge) Warning(opts ...interface{}) {
+	lb.log.Warning(opts...)
+}
+
+func (lb *logrusBridge) Warningf(s string, opts ...interface{}) {
 	lb.log.Warningf(s, opts...)
 }
 
-func (lb *logrusBridge) Info(s string, opts ...interface{}) {
+func (lb *logrusBridge) Info(opts ...interface{}) {
+	lb.log.Info(opts...)
+}
+
+func (lb *logrusBridge) Infof(s string, opts ...interface{}) {
 	lb.log.Infof(s, opts...)
 }
 

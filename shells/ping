@@ -1,2 +1,5 @@
-#!/bin/sh
-ping -c 2 "${JARBAS_ARG_HOST}"
+#!/bin/bash
+set -x
+echo kasjdflkjasldkfjasdf
+echo asdkfjalsdkfjaksdfj
+/sbin/ping -c 2 "${JARBAS_ARG_HOST}"
